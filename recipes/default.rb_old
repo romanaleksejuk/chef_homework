@@ -1,0 +1,167 @@
+#
+# Cookbook:: base-wrappper
+# Recipe:: default
+#
+# Copyright:: 2020, The Authors, All Rights Reserved.
+
+docker_service 'default' do
+    install_method 'auto'
+    service_manager 'auto'
+    action [:create, :start]
+end
+
+docker_network 'net1' do
+  action :create
+end
+
+unless node['prometheus_exporters']['disable']
+  node_port = node['prometheus_exporters']['node']['port']
+  interface_name = node['prometheus_exporters']['listen_interface']
+  interface = node['network']['interfaces'][interface_name]
+  listen_ip = interface['addresses'].find do |_address, data|
+    data['family'] == 'inet'
+  end.first
+
+  node_exporter 'main' do
+    web_listen_address "#{listen_ip}:#{node_port}"
+    collectors_enabled node['prometheus_exporters']['node']['collectors_enabled']
+    collectors_disabled node['prometheus_exporters']['node']['collectors_disabled']
+    collector_textfile_directory node['prometheus_exporters']['node']['textfile_directory']
+    collector_netdev_ignored_devices node['prometheus_exporters']['node']['ignored_net_devs']
+    collector_filesystem_ignored_mount_points node['prometheus_exporters']['node']['ignored_mount_points']
+    #user node['prometheus_exporters']['node']['user']
+
+    action %i[install enable start]
+  end
+end
+
+remote_file '/usr/local/bin/cadvisor' do
+  source 'https://github.com/google/cadvisor/releases/download/v0.35.0/cadvisor'
+  mode '0755'
+  action :create_if_missing
+end
+systemd_unit 'cadvisor.service' do
+  content <<-EOU.gsub(/^\s+/, '')
+  [Unit]
+  Description=Analyzes resource usage and performance characteristics of running containers
+  After=local-fs.target network-online.target network.target
+  Wants=local-fs.target network-online.target network.target
+  
+  [Service]
+  ExecStart=/usr/local/bin/cadvisor
+  Type=simple
+  Restart=on-failure
+  
+  [Install]
+  WantedBy=multi-user.target  
+  EOU
+action [ :create, :enable, :start]
+verify false
+end
+
+#service 'cadvisor' do
+#  subscribes :restart, 'remote_file[/usr/local/bin/cadvisor]', :immediately
+#end
+
+
+
+
+docker_image "prometheus" do
+  repo 'prom/prometheus'
+  tag 'v2.16.0'
+  action :pull
+end
+
+docker_container 'prometheus' do
+  repo 'prom/prometheus'
+  tag 'v2.16.0'
+  action :run_if_missing
+  restart_policy 'always'
+  network_mode 'net1'
+  port '9090:9090'
+  volumes [ '/etc/prometheus/:/etc/prometheus/' ]
+end
+
+execute 'prometheus-restart' do
+  command 'docker restart prometheus'
+  action :nothing
+end
+
+directory '/etc/prometheus' do
+  mode '0755'
+  action :create
+end
+
+template '/etc/prometheus/prometheus.yml' do
+  source 'prometheus/prometheus.erb'
+  mode '0755'
+  notifies :run, 'execute[prometheus-restart]', :delayed
+end
+
+
+execute 'grafana-restart' do
+  command 'docker restart grafana'
+  action :nothing
+end
+
+directory '/etc/grafana/provisioning/datasources' do
+  recursive true
+  mode '0755'
+  action :create
+end
+
+directory '/etc/grafana/provisioning/dashboards' do
+  mode '0755'
+  action :create
+end
+
+directory '/var/lib/grafana/dashboards' do
+  recursive true
+  mode '0755'
+  action :create
+end
+
+template '/etc/grafana/provisioning/datasources/datasource.yaml' do
+  source 'grafana/datasource.erb'
+  mode '0755'
+  notifies :run, 'execute[grafana-restart]', :delayed
+end
+
+template '/etc/grafana/provisioning/dashboards/dashboards.yaml' do
+  source 'grafana/dashboards.erb'
+  mode '0755'
+  notifies :run, 'execute[grafana-restart]', :delayed
+end
+
+
+
+cookbook_file '/var/lib/grafana/dashboards/cadvisor.json' do
+  source 'grafana/cadvisor.json'
+  mode '0755'
+  action :create
+  notifies :run, 'execute[grafana-restart]', :delayed
+end
+
+cookbook_file '/var/lib/grafana/dashboards/node-exporter.json' do
+  source 'grafana/node-exporter.json'
+  mode '0755'
+  action :create
+  notifies :run, 'execute[grafana-restart]', :delayed
+end
+
+docker_image "grafana" do
+  repo 'grafana/grafana'
+  tag '6.6.2'
+  action :pull
+end
+
+docker_container 'grafana' do
+  repo 'grafana/grafana'
+  tag '6.6.2'
+  action :run_if_missing
+  restart_policy 'always'
+  network_mode 'net1'
+  port '3000:3000'
+  env ['GF_SECURITY_ADMIN_PASSWORD=secret'] 
+  volumes ['/etc/grafana/provisioning:/etc/grafana/provisioning','/var/lib/grafana/dashboards:/var/lib/grafana/dashboards']
+end
