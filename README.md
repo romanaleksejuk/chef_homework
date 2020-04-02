@@ -14,9 +14,3 @@ Write a Chef cookbook which
 
 Requirements: Cookbook should be kitchen testable. Use CentOS 7 for OS.
 
-Below we provide a few cookbook examples for inspiration:
-
-- https://github.com/vinted/chef-orchestrator
-- https://github.com/vinted/chef-proxysql
-- https://github.com/vinted/chef-vitess
-
